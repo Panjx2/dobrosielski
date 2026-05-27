@@ -1,0 +1,14 @@
+Definicja incydentu krytycznego (Critical Incident).
+
+Incydent jest klasyfikowany jako krytyczny, jeżeli spełnia
+co najmniej jeden z poniższych warunków:
+
+- powoduje niedostępność kluczowej usługi biznesowej,
+- powoduje utratę lub uszkodzenie danych produkcyjnych,
+- stanowi naruszenie bezpieczeństwa (data breach, unauthorized access),
+- jest atakiem ransomware lub innym malware o szerokim zasięgu,
+- prowadzi do wycieku danych osobowych lub poufnych,
+- dotyczy systemu objętego wymaganiami regulacyjnymi (np. RODO, PCI DSS).
+
+Każdy incydent krytyczny musi być natychmiast eskalowany do SOC
+oraz raportowany w cotygodniowym przeglądzie zarządu.

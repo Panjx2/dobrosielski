@@ -1,0 +1,23 @@
+Playbook obsługi ataku ransomware.
+
+Krok 1: Natychmiastowa izolacja zainfekowanych hostów od sieci
+(odłączenie kabla / odpięcie z VLAN-u).
+
+Krok 2: Powiadomienie zespołu SOC oraz CISO. Atak ransomware jest
+domyślnie traktowany jako incydent krytyczny.
+
+Krok 3: Zachowanie próbek złośliwego oprogramowania i obrazu dysku
+do analizy forensic. NIE wyłączać hosta - utracimy zawartość RAM.
+
+Krok 4: Identyfikacja wariantu ransomware (Hash, IOC, behawior).
+
+Krok 5: Sprawdzenie integralności backupów offline. NIE odtwarzać
+backupów online, jeśli istnieje ryzyko, że są zaszyfrowane.
+
+Krok 6: Odtworzenie systemów z czystych backupów po potwierdzeniu,
+że wektor infekcji został zamknięty.
+
+Krok 7: NIE płacić okupu. Zgłosić incydent organom ścigania
+oraz - jeśli dotyczy danych osobowych - do UODO w ciągu 72h.
+
+Krok 8: Post-incident review, aktualizacja reguł EDR/SIEM.

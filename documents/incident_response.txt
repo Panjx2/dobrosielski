@@ -1,0 +1,15 @@
+Procedura reakcji na incydent IT (Incident Response).
+
+1. Wykrycie incydentu przez system monitoringu lub zgłoszenie użytkownika.
+2. Klasyfikacja incydentu według poziomu ważności (low / medium / high / critical).
+3. Powiadomienie zespołu SOC oraz właściciela systemu.
+4. Izolacja zagrożonego systemu od reszty sieci, jeżeli to konieczne.
+5. Analiza logów i identyfikacja źródła incydentu.
+6. Wdrożenie działań naprawczych zgodnie z procedurą recovery.
+7. Dokumentacja incydentu i post-mortem.
+
+Czas reakcji:
+- critical: 15 minut,
+- high: 1 godzina,
+- medium: 4 godziny,
+- low: 24 godziny.

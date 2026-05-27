@@ -1,0 +1,11 @@
+Polityka bezpieczeństwa informacji.
+
+Każdy pracownik zobowiązany jest do:
+- przestrzegania zasady najmniejszych uprawnień (least privilege),
+- stosowania uwierzytelniania wieloskładnikowego (MFA) dla wszystkich kont produkcyjnych,
+- raportowania podejrzanych zdarzeń do zespołu SOC w ciągu 1 godziny,
+- nieudostępniania haseł i tokenów dostępu osobom trzecim,
+- używania wyłącznie zatwierdzonego oprogramowania.
+
+Wszystkie incydenty bezpieczeństwa muszą być logowane w systemie SIEM
+i objęte procedurą response.

@@ -1,0 +1,12 @@
+Procedura odtwarzania usług (Recovery Procedure).
+
+Standardowe kroki recovery dla serwera produkcyjnego:
+1. Restart usługi i weryfikacja, czy problem jest powtarzalny.
+2. Weryfikacja logów aplikacyjnych i systemowych.
+3. Odtworzenie backupu z ostatniego znanego sprawnego stanu.
+4. Walidacja integralności danych po przywróceniu.
+5. Eskalacja incydentu do zespołu SOC, jeżeli przyczyna nie została ustalona.
+6. Aktualizacja statusu incydentu w systemie ticketowym.
+
+RTO (Recovery Time Objective): 4 godziny dla systemów krytycznych.
+RPO (Recovery Point Objective): maksymalnie 1 godzina utraty danych.
