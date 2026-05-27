@@ -5,16 +5,15 @@ Hybrid Retrieval AI System: SQL + RAG + LLM dla analizy incydentów IT
 Implementacja zgodna z "Zadanie do wykonania" z dokumentu:
 - SQL: incidents / users / systems
 - RAG: procedury bezpieczeństwa, playbook ransomware, definicja incydentu krytycznego
-- LLM: Ollama (lokalnie) z fallbackiem na mock
+- LLM: Anthropic Claude Haiku z fallbackiem na mock
 """
 
-import json
 import os
 import sqlite3
 from typing import Any, Dict, List, Optional
 
+import anthropic
 import faiss
-import requests
 from flask import Flask, jsonify, request
 from sentence_transformers import SentenceTransformer
 
@@ -31,9 +30,12 @@ CHUNK_SIZE = 600
 CHUNK_OVERLAP = 100
 TOP_K = 3
 
-OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3.1")
-OLLAMA_TIMEOUT = float(os.environ.get("OLLAMA_TIMEOUT", "30"))
+ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5")
+ANTHROPIC_MAX_TOKENS = int(os.environ.get("ANTHROPIC_MAX_TOKENS", "1024"))
+
+_anthropic_client: Optional[anthropic.Anthropic] = None
+if os.environ.get("ANTHROPIC_API_KEY"):
+    _anthropic_client = anthropic.Anthropic()
 
 
 # ============================================================
@@ -372,25 +374,29 @@ class RagEngine:
 # ============================================================
 
 def call_llm(prompt: str) -> str:
-    """Wywołuje lokalny model przez Ollama. Fallback: mock z pełnym promptem."""
+    """Wywołuje Claude Haiku przez Anthropic API. Fallback: mock z pełnym promptem."""
+
+    if _anthropic_client is None:
+        return (
+            "[MOCK LLM — brak ANTHROPIC_API_KEY]\n"
+            f"Model: {ANTHROPIC_MODEL}\n\n"
+            f"--- PROMPT ---\n{prompt}"
+        )
 
     try:
-        response = requests.post(
-            f"{OLLAMA_URL}/api/generate",
-            json={
-                "model": OLLAMA_MODEL,
-                "prompt": prompt,
-                "stream": False,
-            },
-            timeout=OLLAMA_TIMEOUT,
+        response = _anthropic_client.messages.create(
+            model=ANTHROPIC_MODEL,
+            max_tokens=ANTHROPIC_MAX_TOKENS,
+            messages=[{"role": "user", "content": prompt}],
         )
-        response.raise_for_status()
-        data = response.json()
-        return data.get("response", "").strip() or "[Ollama zwrócił pustą odpowiedź]"
-    except (requests.RequestException, json.JSONDecodeError) as exc:
+        text = next(
+            (b.text for b in response.content if b.type == "text"), ""
+        ).strip()
+        return text or "[Claude zwrócił pustą odpowiedź]"
+    except anthropic.APIError as exc:
         return (
-            f"[MOCK LLM — Ollama niedostępne: {exc.__class__.__name__}]\n"
-            f"Model: {OLLAMA_MODEL} @ {OLLAMA_URL}\n\n"
+            f"[MOCK LLM — Anthropic API niedostępne: {exc.__class__.__name__}]\n"
+            f"Model: {ANTHROPIC_MODEL}\n\n"
             f"--- PROMPT ---\n{prompt}"
         )
 
@@ -528,7 +534,7 @@ rag_engine = initialize_system()
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "model": OLLAMA_MODEL})
+    return jsonify({"status": "ok", "model": ANTHROPIC_MODEL})
 
 
 @app.route("/ask", methods=["POST"])
