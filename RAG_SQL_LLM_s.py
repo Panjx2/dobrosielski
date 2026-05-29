@@ -522,6 +522,83 @@ w języku naturalnym dla analityka SOC.
 app = Flask(__name__)
 
 
+INDEX_HTML = """<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<title>AI Incident Management Copilot</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 860px; margin: 2rem auto; padding: 0 1rem; }
+  h1 { font-size: 1.4rem; }
+  textarea { width: 100%; height: 5rem; font: inherit; padding: .5rem; box-sizing: border-box; }
+  button { padding: .5rem 1rem; font: inherit; cursor: pointer; }
+  .examples button { margin: .15rem; font-size: .85rem; }
+  .out { margin-top: 1rem; padding: 1rem; background: #f4f4f4; border-radius: 6px;
+         white-space: pre-wrap; font-family: ui-monospace, monospace; font-size: .9rem; }
+  .route { display: inline-block; padding: .1rem .5rem; border-radius: 4px;
+           background: #2563eb; color: white; font-size: .8rem; }
+  .answer { background: #fff; border: 1px solid #ddd; padding: 1rem; margin-top: .5rem; border-radius: 6px; }
+  details { margin-top: .5rem; }
+</style>
+</head>
+<body>
+<h1>AI Incident Management Copilot</h1>
+<p>Model: <code id="model">…</code></p>
+
+<div class="examples">
+  <strong>Przykłady:</strong><br>
+  <button onclick="setQ('Ile incydentów krytycznych mamy w maju?')">krytyczne w maju</button>
+  <button onclick="setQ('Które serwery mają najwięcej awarii?')">top serwery</button>
+  <button onclick="setQ('Pokaż otwarte incydenty')">otwarte</button>
+  <button onclick="setQ('Jak reagować na atak ransomware?')">ransomware playbook</button>
+  <button onclick="setQ('Co kwalifikuje incydent jako krytyczny?')">definicja krytycznego</button>
+  <button onclick="setQ('Ile mamy otwartych incydentów i jaka jest procedura reakcji?')">hybrid</button>
+</div>
+
+<p><textarea id="q" placeholder="Zadaj pytanie po polsku…"></textarea></p>
+<p><button onclick="ask()">Zapytaj</button></p>
+
+<div id="result"></div>
+
+<script>
+fetch('/health').then(r => r.json()).then(d => document.getElementById('model').textContent = d.model);
+
+function setQ(t) { document.getElementById('q').value = t; }
+
+async function ask() {
+  const q = document.getElementById('q').value.trim();
+  if (!q) return;
+  const result = document.getElementById('result');
+  result.innerHTML = '<p>⏳ Myślę…</p>';
+  try {
+    const r = await fetch('/ask', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({question: q}),
+    });
+    const data = await r.json();
+    const resp = data.response || {};
+    const parts = [
+      `<p><span class="route">${data.route}</span></p>`,
+      `<div class="answer">${(resp.answer || '').replace(/</g,'&lt;')}</div>`,
+    ];
+    if (resp.sql)     parts.push(`<details><summary>SQL</summary><div class="out">${resp.sql}</div></details>`);
+    if (resp.result)  parts.push(`<details><summary>Wynik SQL</summary><div class="out">${JSON.stringify(resp.result, null, 2)}</div></details>`);
+    if (resp.sources) parts.push(`<details><summary>Źródła RAG (${resp.sources.length})</summary><div class="out">${JSON.stringify(resp.sources, null, 2)}</div></details>`);
+    result.innerHTML = parts.join('');
+  } catch (e) {
+    result.innerHTML = `<p style="color:red">Błąd: ${e}</p>`;
+  }
+}
+
+document.getElementById('q').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) ask();
+});
+</script>
+</body>
+</html>"""
+
+
 def initialize_system() -> RagEngine:
     if not os.path.exists(DB_PATH):
         create_database()
@@ -530,6 +607,11 @@ def initialize_system() -> RagEngine:
 
 
 rag_engine = initialize_system()
+
+
+@app.route("/", methods=["GET"])
+def home():
+    return INDEX_HTML
 
 
 @app.route("/health", methods=["GET"])
@@ -569,4 +651,5 @@ def rag_endpoint():
 # ============================================================
 
 if __name__ == "__main__":
+    print("API key loaded:", bool(os.environ.get("ANTHROPIC_API_KEY")))
     app.run(host="0.0.0.0", port=5000, debug=True)
