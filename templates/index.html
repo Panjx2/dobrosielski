@@ -781,6 +781,8 @@
             });
         }
 
+
+        // Fetch helper
         async function fetchAPI(endpoint, options = {}) {
             try {
                 const res = await fetch(endpoint, {
@@ -813,36 +815,123 @@
             }
         }
 
-        async function loadSystemHealth() {
-            const healthData = await fetchAPI('/health');
-            if (!healthData) {
-                systemStatus.online = false;
-                document.getElementById('statusBadge').className = 'status-badge offline';
-                document.getElementById('statusBadge').querySelector('.status-text').textContent = 'System Offline';
-                document.getElementById('modelBadge').textContent = 'Niedostępny';
-                document.getElementById('sendBtn').disabled = true;
-                return;
-            }
+ async function loadSystemHealth() {
+    const healthData = await fetchAPI('/healthy');
 
-            systemStatus.online = true;
-            systemStatus.llmAvailable = healthData.llm === true;
-            systemStatus.modelName = healthData.model || 'Claude Haiku';
+    const badge = document.getElementById('statusBadge');
+    const modelBadge = document.getElementById('modelBadge');
+    const sendBtn = document.getElementById('sendBtn');
+    const banner = document.getElementById('warningBanner');
+    const warningMessage = document.getElementById('warningMessage');
 
-            if (!systemStatus.llmAvailable) {
-                document.getElementById('statusBadge').className = 'status-badge degraded';
-                document.getElementById('statusBadge').querySelector('.status-text').textContent = 'Tryb offline (mock)';
-                document.getElementById('modelBadge').textContent = `${systemStatus.modelName} (mock)`;
-                const banner = document.getElementById('warningBanner');
-                banner.style.display = 'flex';
-                document.getElementById('warningMessage').textContent = 'Tryb offline - brak klucza API Anthropic. Odpowiedzi będą generowane w trybie mock.';
-            } else {
-                document.getElementById('statusBadge').className = 'status-badge online';
-                document.getElementById('statusBadge').querySelector('.status-text').textContent = 'System Online';
-                document.getElementById('modelBadge').textContent = systemStatus.modelName;
-                document.getElementById('warningBanner').style.display = 'none';
-                document.getElementById('sendBtn').disabled = false;
-            }
-        }
+    // brak odpowiedzi / fetch error
+    if (!healthData) {
+        systemStatus.online = false;
+        badge.className = 'status-badge offline';
+        badge.querySelector('.status-text').textContent = 'System Offline';
+        modelBadge.textContent = 'Niedostępny';
+        sendBtn.disabled = true;
+        banner.style.display = 'flex';
+        warningMessage.textContent = 'Brak połączenia z serwerem.';
+        return;
+    }
+
+    systemStatus.online = true;
+    systemStatus.modelName = healthData.model || 'Claude Haiku';
+
+    const status = healthData.status;
+
+    switch (status) {
+
+        case "online":
+            systemStatus.llmAvailable = true;
+
+            badge.className = 'status-badge online';
+            badge.querySelector('.status-text').textContent = 'System Online';
+
+            modelBadge.textContent = systemStatus.modelName;
+
+            banner.style.display = 'none';
+            sendBtn.disabled = false;
+            break;
+
+        case "degraded":
+            systemStatus.llmAvailable = false;
+
+            badge.className = 'status-badge degraded';
+            badge.querySelector('.status-text').textContent = 'Tryb ograniczony';
+
+            modelBadge.textContent = `${systemStatus.modelName} (fallback)`;
+
+            banner.style.display = 'flex';
+            warningMessage.textContent =
+                'System działa w trybie ograniczonym (fallback/mock).';
+
+            sendBtn.disabled = false;
+            break;
+
+        case "no_api":
+            systemStatus.llmAvailable = false;
+
+            badge.className = 'status-badge degraded';
+            badge.querySelector('.status-text').textContent = 'Brak API';
+
+            modelBadge.textContent = 'Niedostępny';
+
+            banner.style.display = 'flex';
+            warningMessage.textContent =
+                'Brak klucza API — system działa w trybie mock.';
+
+            sendBtn.disabled = true;
+            break;
+
+        case "model_error":
+            systemStatus.llmAvailable = false;
+
+            badge.className = 'status-badge degraded';
+            badge.querySelector('.status-text').textContent = 'Błąd modelu';
+
+            modelBadge.textContent = systemStatus.modelName;
+
+            banner.style.display = 'flex';
+            warningMessage.textContent =
+                'Wystąpił błąd modelu LLM.';
+
+            sendBtn.disabled = true;
+            break;
+
+        case "timeout":
+            systemStatus.llmAvailable = false;
+
+            badge.className = 'status-badge degraded';
+            badge.querySelector('.status-text').textContent = 'Timeout API';
+
+            modelBadge.textContent = 'Brak odpowiedzi';
+
+            banner.style.display = 'flex';
+            warningMessage.textContent =
+                'Serwer nie odpowiedział w czasie.';
+
+            sendBtn.disabled = true;
+            break;
+
+        case "no_response":
+        default:
+            systemStatus.online = false;
+
+            badge.className = 'status-badge offline';
+            badge.querySelector('.status-text').textContent = 'System Offline';
+
+            modelBadge.textContent = 'Niedostępny';
+
+            banner.style.display = 'flex';
+            warningMessage.textContent =
+                'Nieznany stan systemu lub brak odpowiedzi.';
+
+            sendBtn.disabled = true;
+            break;
+    }
+}
 
         async function loadStats() {
             const incidents = await fetchAPI('/incidents');
@@ -965,7 +1054,7 @@
                 sql = response.response.sql;
                 sources = response.response.sources;
             } else {
-                answer = '❌ Błąd komunikacji z API. Upewnij się, że serwer działa.';
+                answer = 'Błąd komunikacji z API. Upewnij się, że serwer działa.';
             }
 
             // Render markdown
