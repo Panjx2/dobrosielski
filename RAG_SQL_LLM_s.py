@@ -14,16 +14,14 @@ from typing import Any, Dict, List, Optional
 
 import anthropic
 import faiss
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, render_template
 from sentence_transformers import SentenceTransformer
 
 # ============================================================
 # 1. KONFIGURACJA
 # ============================================================
-
 DB_PATH = "incidents.db"
 DOCUMENTS_DIR = "documents"
-
 EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 
 CHUNK_SIZE = 600
@@ -137,60 +135,82 @@ def execute_sql(query: str) -> Dict[str, Any]:
 # 3. SQL AGENT (reguły NL -> SQL)
 # ============================================================
 
+import re
+
+
 def generate_sql(question: str, rag_context: str = "") -> Optional[str]:
     """Mapuje pytanie w języku naturalnym na zapytanie SQL."""
 
     q = question.lower()
 
-    if ("ile" in q or "ilu" in q) and "krytyczn" in q and "maj" in q:
-        return """
-        SELECT COUNT(*) AS liczba_incydentow_krytycznych
-        FROM incidents
-        WHERE severity = 'critical'
-          AND strftime('%Y-%m', created_at) = '2026-05';
-        """
+    # Wzorzec: "Ile incydentów w [miesiącu]?"
+    month_pattern = r'(?:ile|ilu|liczba|ileż).*(?:incydent|zdarzen).*(?:w|za).*(?:stycz|lut|mar|kwiec|maj|czerwc|lip|sierp|wrze|paź|list|grud)'
+    if re.search(month_pattern, q):
+        month_map = {
+            "stycz": "01", "lut": "02", "mar": "03", "kwiec": "04",
+            "maj": "05", "czerwc": "06", "lip": "07", "sierp": "08",
+            "wrze": "09", "paź": "10", "list": "11", "grud": "12"
+        }
+        for month_name, month_num in month_map.items():
+            if month_name in q:
+                return f"""
+                SELECT COUNT(*) AS liczba_incydentow
+                FROM incidents
+                WHERE strftime('%Y-%m', created_at) = '2026-{month_num}';
+                """
 
-    if "najwięcej" in q and ("awari" in q or "incydent" in q or "serwer" in q):
-        return """
-        SELECT server_name, COUNT(*) AS failures
-        FROM incidents
-        GROUP BY server_name
-        ORDER BY failures DESC
-        LIMIT 3;
-        """
+    # Wzorzec: "Ile krytycznych w [miesiącu]?"
+    critical_month_pattern = r'(?:ile|ilu|liczba).*(?:krytyczn).*(?:w|za).*(?:stycz|lut|mar|kwiec|maj|czerwc|lip|sierp|wrze|paź|list|grud)'
+    if re.search(critical_month_pattern, q):
+        month_map = {
+            "stycz": "01", "lut": "02", "mar": "03", "kwiec": "04",
+            "maj": "05", "czerwc": "06", "lip": "07", "sierp": "08",
+            "wrze": "09", "paź": "10", "list": "11", "grud": "12"
+        }
+        for month_name, month_num in month_map.items():
+            if month_name in q:
+                return f"""
+                SELECT COUNT(*) AS liczba_krytycznych
+                FROM incidents
+                WHERE severity = 'critical'
+                  AND strftime('%Y-%m', created_at) = '2026-{month_num}';
+                """
 
-    if "otwart" in q or "open" in q:
+    # Wzorzec: "Ile ransomware?"
+    if re.search(r'(?:ile|ilu|liczba).*ransomware', q):
         return """
-        SELECT incident_id, server_name, severity, created_at
-        FROM incidents
-        WHERE status = 'open'
-        ORDER BY created_at DESC;
-        """
-
-    if "ransomware" in q and ("ile" in q or "ilu" in q or "liczba" in q):
-        return """
-        SELECT COUNT(*) AS ransomware_incidents
+        SELECT COUNT(*) AS liczba_ransomware
         FROM incidents
         WHERE category = 'ransomware';
         """
 
-    if "eskalow" in q or "escalat" in q:
+    # Wzorzec: "Które serwery mają najwięcej awarii?"
+    if re.search(r'(?:które|jaki|najwi(?:e|ę)cej).*serwer.*awari', q):
         return """
-        SELECT incident_id, server_name, severity, created_at
+        SELECT server_name, COUNT(*) AS liczba_awarii
         FROM incidents
-        WHERE status = 'escalated';
+        GROUP BY server_name
+        ORDER BY liczba_awarii DESC
+        LIMIT 5;
         """
 
-    if "według ważności" in q or "severity" in q or "wagi" in q:
+    # Wzorzec: "Pokaż otwarte incydenty"
+    if re.search(r'(?:pokaż|pokaz|lista).*otwart', q):
         return """
-        SELECT severity, COUNT(*) AS liczba
+        SELECT incident_id, server_name, severity, category, created_at
         FROM incidents
-        GROUP BY severity
-        ORDER BY liczba DESC;
+        WHERE status = 'open'
+        ORDER BY 
+            CASE severity
+                WHEN 'critical' THEN 1
+                WHEN 'high' THEN 2
+                WHEN 'medium' THEN 3
+                WHEN 'low' THEN 4
+            END,
+            created_at DESC;
         """
 
     return None
-
 
 # ============================================================
 # 4. DOKUMENTY DLA RAG
@@ -500,7 +520,7 @@ Pytanie:
 Kontekst RAG (procedury, definicje):
 {rag_context}
 
-{f"Wynik SQL ({sql}):\n{sql_result}" if sql else "Brak danych SQL — odpowiadaj wyłącznie na podstawie dokumentów."}
+{f"Wynik SQL ({sql}):{sql_result}" if sql else "Brak danych SQL — odpowiadaj wyłącznie na podstawie dokumentów."}
 
 Połącz wiedzę z dokumentów z danymi z bazy i sformułuj odpowiedź
 w języku naturalnym dla analityka SOC.
@@ -611,12 +631,43 @@ rag_engine = initialize_system()
 
 @app.route("/", methods=["GET"])
 def home():
-    return INDEX_HTML
+    return render_template('index.html')
 
 
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok", "model": ANTHROPIC_MODEL})
+
+
+@app.route("/incidents", methods=["GET"])
+def api_incidents():
+    try:
+        severity = request.args.get("severity", "all")
+        status = request.args.get("status", "all")
+
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+
+        query = "SELECT * FROM incidents WHERE 1=1"
+        params = []
+
+        if severity and severity != "all":
+            query += " AND severity = ?"
+            params.append(severity)
+        if status and status != "all":
+            query += " AND status = ?"
+            params.append(status)
+
+        query += " ORDER BY created_at DESC"
+        cur.execute(query, params)
+        rows = cur.fetchall()
+        conn.close()
+
+        incidents = [dict(row) for row in rows]
+        return jsonify(incidents)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/ask", methods=["POST"])
@@ -632,6 +683,41 @@ def ask():
         response = answer_with_hybrid(question, rag_engine)
 
     return jsonify({"question": question, "route": route, "response": response})
+
+
+@app.route("/documents", methods=["GET"])
+def documents():
+    try:
+        documents_meta = []
+        if not os.path.exists(DOCUMENTS_DIR):
+            return jsonify([])
+
+        for filename in sorted(os.listdir(DOCUMENTS_DIR)):
+            if not filename.endswith(".txt"):
+                continue
+
+            filepath = os.path.join(DOCUMENTS_DIR, filename)
+
+            with open(filepath, "r", encoding="utf-8") as f:
+                content = f.read()
+
+            chunks_count = len(chunk_text(content))
+            preview = content[:200].strip()
+            if len(content) > 200:
+                preview += "..."
+
+            documents_meta.append({
+                "name": filename,
+                "chunks": chunks_count,
+                "size": os.path.getsize(filepath),
+                "preview": preview,
+                "modified": os.path.getmtime(filepath)
+            })
+
+        return jsonify(documents_meta)
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/sql", methods=["POST"])
