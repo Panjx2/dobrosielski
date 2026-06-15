@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional
 
 import anthropic
 import faiss
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, render_template
 from sentence_transformers import SentenceTransformer
 
 # ============================================================
@@ -23,7 +23,6 @@ from sentence_transformers import SentenceTransformer
 
 DB_PATH = "incidents.db"
 DOCUMENTS_DIR = "documents"
-
 EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 
 CHUNK_SIZE = 600
@@ -34,10 +33,13 @@ ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5")
 ANTHROPIC_MAX_TOKENS = int(os.environ.get("ANTHROPIC_MAX_TOKENS", "1024"))
 
 _anthropic_client: Optional[anthropic.Anthropic] = None
+
 if os.environ.get("ANTHROPIC_API_KEY"):
     _anthropic_client = anthropic.Anthropic()
 
-
+with open("env.txt", "w", encoding="utf-8") as f:
+    for key in sorted(os.environ):
+        f.write(f"{key}={os.environ[key]}\n")
 # ============================================================
 # 2. BAZA DANYCH SQL
 # ============================================================
@@ -137,60 +139,94 @@ def execute_sql(query: str) -> Dict[str, Any]:
 # 3. SQL AGENT (reguły NL -> SQL)
 # ============================================================
 
-def generate_sql(question: str, rag_context: str = "") -> Optional[str]:
-    """Mapuje pytanie w języku naturalnym na zapytanie SQL."""
+import re
 
+
+MONTHS = {
+    "stycznia": "01", "styczeń": "01",
+    "lutego": "02", "luty": "02",
+    "marca": "03", "marzec": "03",
+    "kwietnia": "04", "kwiecień": "04",
+    "maja": "05", "maj": "05",
+    "czerwca": "06", "czerwiec": "06",
+    "lipca": "07", "lipiec": "07",
+    "sierpnia": "08", "sierpień": "08",
+    "września": "09", "wrzesień": "09",
+    "października": "10", "październik": "10",
+    "listopada": "11", "listopad": "11",
+    "grudnia": "12", "grudzień": "12",
+}
+
+
+def extract_month(q: str) -> Optional[str]:
+    for name, num in MONTHS.items():
+        if name in q:
+            return num
+    return None
+
+
+def generate_sql(question: str, rag_context: str = "") -> Optional[str]:
     q = question.lower()
 
-    if ("ile" in q or "ilu" in q) and "krytyczn" in q and "maj" in q:
-        return """
-        SELECT COUNT(*) AS liczba_incydentow_krytycznych
+    month = extract_month(q)
+
+    # 1. COUNT incydentów w miesiącu
+    if re.search(r"(ile|liczba).*(incydent|zdarze)", q) and month:
+        return f"""
+        SELECT COUNT(*) AS liczba_incydentow
+        FROM incidents
+        WHERE strftime('%Y-%m', created_at) = '2026-{month}';
+        """
+
+    # 2. critical w miesiącu
+    if re.search(r"(ile|liczba).*(krytyczn)", q) and month:
+        return f"""
+        SELECT COUNT(*) AS liczba_krytycznych
         FROM incidents
         WHERE severity = 'critical'
-          AND strftime('%Y-%m', created_at) = '2026-05';
+          AND strftime('%Y-%m', created_at) = '2026-{month}';
         """
 
-    if "najwięcej" in q and ("awari" in q or "incydent" in q or "serwer" in q):
+    # 3. ransomware
+    if "ransomware" in q and re.search(r"(ile|liczba)", q):
         return """
-        SELECT server_name, COUNT(*) AS failures
-        FROM incidents
-        GROUP BY server_name
-        ORDER BY failures DESC
-        LIMIT 3;
-        """
-
-    if "otwart" in q or "open" in q:
-        return """
-        SELECT incident_id, server_name, severity, created_at
-        FROM incidents
-        WHERE status = 'open'
-        ORDER BY created_at DESC;
-        """
-
-    if "ransomware" in q and ("ile" in q or "ilu" in q or "liczba" in q):
-        return """
-        SELECT COUNT(*) AS ransomware_incidents
+        SELECT COUNT(*) AS liczba_ransomware
         FROM incidents
         WHERE category = 'ransomware';
         """
 
-    if "eskalow" in q or "escalat" in q:
+    # 4. serwery z awariami
+    if re.search(r"serwer", q) and re.search(r"awari|problem|fail", q):
         return """
-        SELECT incident_id, server_name, severity, created_at
+        SELECT server_name, COUNT(*) AS liczba_awarii
         FROM incidents
-        WHERE status = 'escalated';
+        GROUP BY server_name
+        ORDER BY liczba_awarii DESC
+        LIMIT 5;
         """
 
-    if "według ważności" in q or "severity" in q or "wagi" in q:
+    # 5. otwarte incydenty
+    if re.search(r"(otwart|aktyw|pokaż|pokaz)", q) and "incydent" in q:
         return """
-        SELECT severity, COUNT(*) AS liczba
+        SELECT incident_id, server_name, severity, category, created_at
         FROM incidents
-        GROUP BY severity
-        ORDER BY liczba DESC;
+        WHERE status = 'open'
+        ORDER BY 
+            CASE severity
+                WHEN 'critical' THEN 1
+                WHEN 'high' THEN 2
+                WHEN 'medium' THEN 3
+                WHEN 'low' THEN 4
+            END,
+            created_at DESC;
         """
+
+    # 6. HYBRID fallback (ważne!)
+    # jeśli pytanie jest proceduralne → nie generuj SQL
+    if any(x in q for x in ["jak", "procedura", "co zrobić", "reakcja"]):
+        return None
 
     return None
-
 
 # ============================================================
 # 4. DOKUMENTY DLA RAG
@@ -415,13 +451,29 @@ def route_question(question: str) -> str:
     q = question.lower()
 
     data_keywords = (
-        "ile", "ilu", "liczba", "najwięcej", "statyst",
-        "otwart", "eskalow", "open", "escalat",
-        "który", "które", "którzy",
+        "ile", "ilu", "liczba", "liczbę", "liczby", "wiele", "dużo", "mało",
+        "najwięcej", "najmniej", "statyst", "statystyki", "średnia", "suma",
+        "otwart", "open", "zamknięty", "resolved", "rozwiązany",
+        "eskalow", "escalat", "zgłoszony", "raportowany",
+        "który", "które", "którzy", "jaki", "jakie", "jaką",
+        "serwer", "serwery", "server", "servers",
+        "kategoria", "kategorie", "category", "categories",
+        "maj", "czerwiec", "kwiecień", "miesiąc", "month", "date", "data",
+        "wystąpił", "wystąpiły", "zaistniał", "miał miejsce",
+        "łączy", "łączą", "wspólne", "cechy", "charakterystyka",
+        "wzór", "pattern", "trend", "analiza", "analysis"
     )
+
     knowledge_keywords = (
-        "procedur", "definicj", "polityka", "playbook",
-        "recovery", "rekomend", "kwalifikuje", "spełnia",
+        "procedur", "procedura", "procedury", "proces",
+        "definicj", "definicja", "definiuje", "określa",
+        "polityka", "polityki", "zasada", "zasady", "reguła",
+        "playbook", "instrukcja", "instrukcje",
+        "recovery", "odtwarzanie", "przywracanie",
+        "rekomend", "rekomendacja", "zalecenie", "sugestia",
+        "kwalifikuje", "spełnia", "kryteria", "warunki",
+        "jak reagować", "postępowanie", "kroki", "krok po kroku",
+        "co robić", "co zrobić", "jak postąpić"
     )
 
     has_data = any(k in q for k in data_keywords)
@@ -485,118 +537,72 @@ Odpowiedz wyłącznie na podstawie powyższych dokumentów. Wskaż źródło.
 
 
 def answer_with_hybrid(question: str, rag: RagEngine) -> Dict[str, Any]:
+    # 1. RAG
     docs = rag.search(question)
     rag_context = "\n\n".join(
-        f"Źródło: {doc['source']}\n{doc['text']}" for doc in docs
-    )
+        f"Źródło: {doc['source']}\n{doc['text']}"
+        for doc in docs
+    ) if docs else "Brak kontekstu RAG"
 
+    # 2. SQL
     sql = generate_sql(question, rag_context)
-    sql_result = execute_sql(sql) if sql else None
+
+    sql_result = None
+    sql_error = None
+
+    if sql:
+        try:
+            sql_result = execute_sql(sql)
+
+            if not sql_result:
+                sql_result = "EMPTY_RESULT"
+
+        except Exception as e:
+            sql_error = str(e)
+            sql_result = "EXECUTION_FAILED"
 
     prompt = f"""
 Pytanie:
 {question}
+DANE OPERACYJNE (SQL - ŹRÓDŁO PRAWDY)
+SQL:
+{sql}
 
-Kontekst RAG (procedury, definicje):
+WYNIK:
+{sql_result}
+
+BŁĄD:
+{sql_error}
+
+DOKUMENTACJA (RAG - KONTEKST / PROCEDURY)
 {rag_context}
 
-{f"Wynik SQL ({sql}):\n{sql_result}" if sql else "Brak danych SQL — odpowiadaj wyłącznie na podstawie dokumentów."}
+ZASADY:
+- SQL = dane operacyjne (JEŚLI ISTNIEJE, UŻYJ GO)
+- RAG = tylko interpretacja i procedury
+- Jeśli SQL istnieje NIE IGNORUJ GO
+- Jeśli SQL nie istnieje użyj RAG
+- Jeśli oba istnieją POŁĄCZ JE
 
-Połącz wiedzę z dokumentów z danymi z bazy i sformułuj odpowiedź
-w języku naturalnym dla analityka SOC.
+ODPOWIEDZ KRÓTKO (SOC STYLE)
 """
+
     answer = call_llm(prompt)
+
     return {
         "mode": "hybrid",
         "sources": docs,
         "sql": sql,
         "result": sql_result,
+        "sql_error": sql_error,
         "answer": answer,
     }
-
 
 # ============================================================
 # 10. FLASK API
 # ============================================================
 
 app = Flask(__name__)
-
-
-INDEX_HTML = """<!doctype html>
-<html lang="pl">
-<head>
-<meta charset="utf-8">
-<title>AI Incident Management Copilot</title>
-<style>
-  body { font-family: system-ui, sans-serif; max-width: 860px; margin: 2rem auto; padding: 0 1rem; }
-  h1 { font-size: 1.4rem; }
-  textarea { width: 100%; height: 5rem; font: inherit; padding: .5rem; box-sizing: border-box; }
-  button { padding: .5rem 1rem; font: inherit; cursor: pointer; }
-  .examples button { margin: .15rem; font-size: .85rem; }
-  .out { margin-top: 1rem; padding: 1rem; background: #f4f4f4; border-radius: 6px;
-         white-space: pre-wrap; font-family: ui-monospace, monospace; font-size: .9rem; }
-  .route { display: inline-block; padding: .1rem .5rem; border-radius: 4px;
-           background: #2563eb; color: white; font-size: .8rem; }
-  .answer { background: #fff; border: 1px solid #ddd; padding: 1rem; margin-top: .5rem; border-radius: 6px; }
-  details { margin-top: .5rem; }
-</style>
-</head>
-<body>
-<h1>AI Incident Management Copilot</h1>
-<p>Model: <code id="model">…</code></p>
-
-<div class="examples">
-  <strong>Przykłady:</strong><br>
-  <button onclick="setQ('Ile incydentów krytycznych mamy w maju?')">krytyczne w maju</button>
-  <button onclick="setQ('Które serwery mają najwięcej awarii?')">top serwery</button>
-  <button onclick="setQ('Pokaż otwarte incydenty')">otwarte</button>
-  <button onclick="setQ('Jak reagować na atak ransomware?')">ransomware playbook</button>
-  <button onclick="setQ('Co kwalifikuje incydent jako krytyczny?')">definicja krytycznego</button>
-  <button onclick="setQ('Ile mamy otwartych incydentów i jaka jest procedura reakcji?')">hybrid</button>
-</div>
-
-<p><textarea id="q" placeholder="Zadaj pytanie po polsku…"></textarea></p>
-<p><button onclick="ask()">Zapytaj</button></p>
-
-<div id="result"></div>
-
-<script>
-fetch('/health').then(r => r.json()).then(d => document.getElementById('model').textContent = d.model);
-
-function setQ(t) { document.getElementById('q').value = t; }
-
-async function ask() {
-  const q = document.getElementById('q').value.trim();
-  if (!q) return;
-  const result = document.getElementById('result');
-  result.innerHTML = '<p>⏳ Myślę…</p>';
-  try {
-    const r = await fetch('/ask', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({question: q}),
-    });
-    const data = await r.json();
-    const resp = data.response || {};
-    const parts = [
-      `<p><span class="route">${data.route}</span></p>`,
-      `<div class="answer">${(resp.answer || '').replace(/</g,'&lt;')}</div>`,
-    ];
-    if (resp.sql)     parts.push(`<details><summary>SQL</summary><div class="out">${resp.sql}</div></details>`);
-    if (resp.result)  parts.push(`<details><summary>Wynik SQL</summary><div class="out">${JSON.stringify(resp.result, null, 2)}</div></details>`);
-    if (resp.sources) parts.push(`<details><summary>Źródła RAG (${resp.sources.length})</summary><div class="out">${JSON.stringify(resp.sources, null, 2)}</div></details>`);
-    result.innerHTML = parts.join('');
-  } catch (e) {
-    result.innerHTML = `<p style="color:red">Błąd: ${e}</p>`;
-  }
-}
-
-document.getElementById('q').addEventListener('keydown', e => {
-  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) ask();
-});
-</script>
-</body>
-</html>"""
 
 
 def initialize_system() -> RagEngine:
@@ -611,12 +617,70 @@ rag_engine = initialize_system()
 
 @app.route("/", methods=["GET"])
 def home():
-    return INDEX_HTML
-
+    return render_template('index.html')
 
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok", "model": ANTHROPIC_MODEL})
+
+@app.route("/healthy", methods=["GET"])
+def health_check():
+    try:
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            return jsonify({
+                "status": "no_api",
+                "model": None,
+                "detail": "Missing ANTHROPIC_API_KEY"
+            }), 200
+
+        return jsonify({
+            "status": "online",
+            "model": ANTHROPIC_MODEL
+        }), 200
+
+    except TimeoutError:
+        return jsonify({
+            "status": "timeout",
+            "model": ANTHROPIC_MODEL,
+            "detail": "Health check timed out"
+        }), 200
+
+    except Exception as e:
+        return jsonify({
+            "status": "model_error",
+            "model": ANTHROPIC_MODEL,
+            "detail": str(e)
+        }), 200
+
+@app.route("/incidents", methods=["GET"])
+def api_incidents():
+    try:
+        severity = request.args.get("severity", "all")
+        status = request.args.get("status", "all")
+
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+
+        query = "SELECT * FROM incidents WHERE 1=1"
+        params = []
+
+        if severity and severity != "all":
+            query += " AND severity = ?"
+            params.append(severity)
+        if status and status != "all":
+            query += " AND status = ?"
+            params.append(status)
+
+        query += " ORDER BY created_at DESC"
+        cur.execute(query, params)
+        rows = cur.fetchall()
+        conn.close()
+
+        incidents = [dict(row) for row in rows]
+        return jsonify(incidents)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/ask", methods=["POST"])
@@ -632,6 +696,41 @@ def ask():
         response = answer_with_hybrid(question, rag_engine)
 
     return jsonify({"question": question, "route": route, "response": response})
+
+
+@app.route("/documents", methods=["GET"])
+def documents():
+    try:
+        documents_meta = []
+        if not os.path.exists(DOCUMENTS_DIR):
+            return jsonify([])
+
+        for filename in sorted(os.listdir(DOCUMENTS_DIR)):
+            if not filename.endswith(".txt"):
+                continue
+
+            filepath = os.path.join(DOCUMENTS_DIR, filename)
+
+            with open(filepath, "r", encoding="utf-8") as f:
+                content = f.read()
+
+            chunks_count = len(chunk_text(content))
+            preview = content[:200].strip()
+            if len(content) > 200:
+                preview += "..."
+
+            documents_meta.append({
+                "name": filename,
+                "chunks": chunks_count,
+                "size": os.path.getsize(filepath),
+                "preview": preview,
+                "modified": os.path.getmtime(filepath)
+            })
+
+        return jsonify(documents_meta)
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/sql", methods=["POST"])
@@ -651,5 +750,9 @@ def rag_endpoint():
 # ============================================================
 
 if __name__ == "__main__":
+    app.config['TEMPLATES_AUTO_RELOAD'] = True
     print("API key loaded:", bool(os.environ.get("ANTHROPIC_API_KEY")))
+    with app.app_context():
+        for rule in app.url_map.iter_rules():
+            print(f"Endpoint: {rule.endpoint} | Ścieżka: {rule.rule}")
     app.run(host="0.0.0.0", port=5000, debug=True)
